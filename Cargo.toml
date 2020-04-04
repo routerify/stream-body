@@ -12,7 +12,10 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
+hyper = "0.13"
 log = "0.4"
+pin-project-lite = "0.1.4"
+tokio = { version = "0.2", features= [] }
 
 [dev-dependencies]
 tokio = { version = "0.2", features = ["full"] }
