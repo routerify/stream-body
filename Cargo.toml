@@ -1,0 +1,18 @@
+[package]
+name = "stream-body"
+version = "0.1.0"
+description = "An HttpBody implementation which supports streaming for the Rust HTTP library hyper"
+homepage = "https://github.com/rousan/stream-body"
+repository = "https://github.com/rousan/stream-body"
+keywords = ["rust", "hyper", "aschronous", "stream", "writer"]
+categories = ["asynchronous"]
+authors = ["Rousan Ali <rousanali786@gmail.com>"]
+readme = "README.md"
+license = "MIT"
+edition = "2018"
+
+[dependencies]
+log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "0.2", features = ["full"] }
