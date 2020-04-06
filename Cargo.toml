@@ -1,6 +1,6 @@
 [package]
 name = "stream-body"
-version = "0.1.0"
+version = "0.1.1"
 description = "An HttpBody implementation with efficient streaming support for the Rust HTTP library hyper"
 homepage = "https://github.com/rousan/stream-body"
 repository = "https://github.com/rousan/stream-body"
