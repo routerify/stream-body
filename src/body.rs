@@ -6,6 +6,7 @@ use http::{HeaderMap, HeaderValue};
 use http_body::{Body, SizeHint};
 use pin_project_lite::pin_project;
 use std::borrow::Cow;
+use std::marker::Unpin;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -93,6 +94,24 @@ impl StreamBody {
         };
 
         (w, body)
+    }
+
+    /// A helper method to convert an [AsyncRead](https://docs.rs/tokio/0.2.16/tokio/io/trait.AsyncRead.html) to a `StreamBody`. If there is any error
+    /// thrown during the reading/writing, it will be logged via [log::error!](https://docs.rs/log/0.4.10/log/macro.error.html).
+    pub fn from_reader<R: AsyncRead + Unpin + Send + 'static>(mut r: R) -> StreamBody {
+        let (mut w, body) = StreamBody::channel();
+
+        tokio::spawn(async move {
+            if let Err(err) = io::copy(&mut r, &mut w).await {
+                log::error!(
+                    "{}: StreamBody: Something went wrong while piping the provided reader to the body: {}",
+                    env!("CARGO_PKG_NAME"),
+                    err
+                )
+            }
+        });
+
+        body
     }
 }
 

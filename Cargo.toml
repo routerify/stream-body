@@ -1,10 +1,10 @@
 [package]
 name = "stream-body"
-version = "0.1.0"
+version = "0.1.1"
 description = "An HttpBody implementation with efficient streaming support for the Rust HTTP library hyper"
 homepage = "https://github.com/rousan/stream-body"
 repository = "https://github.com/rousan/stream-body"
-keywords = ["rust", "hyper", "asynchronous", "stream", "writer", "channel"]
+keywords = ["rust", "hyper", "asynchronous", "stream", "writer"]
 categories = ["asynchronous"]
 authors = ["Rousan Ali <rousanali786@gmail.com>"]
 readme = "README.md"
