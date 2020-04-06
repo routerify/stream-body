@@ -1,17 +1,27 @@
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{body::Buf, Body, Request, Response, Server};
+use hyper::{Body, Request, Response, Server};
 use std::{convert::Infallible, net::SocketAddr};
-use stream_body::{StreamBody, StreamData};
+use stream_body::StreamBody;
 use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-async fn handle(_: Request<Body>) -> Result<Response<StreamBody<File>>, Infallible> {
-    // Ok(Response::new("Hello, World!".into()))
+async fn handle(_: Request<Body>) -> Result<Response<StreamBody>, Infallible> {
+    let (mut writer, body) = StreamBody::channel();
 
-    let file = File::open("./Cargo.toml").await.unwrap();
+    tokio::spawn(async move {
+        let mut f = File::open("large-file").await.unwrap();
 
-    let sb = StreamBody::new(file);
+        let mut buf = [0_u8; 1024 * 16];
+        loop {
+            let read_count = f.read(&mut buf).await.unwrap();
+            if read_count == 0 {
+                break;
+            }
+            writer.write_all(&buf[..read_count]).await.unwrap();
+        }
+    });
 
-    Ok(Response::new(sb))
+    Ok(Response::builder().body(body).unwrap())
 }
 
 #[tokio::main]

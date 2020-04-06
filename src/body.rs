@@ -1,130 +1,282 @@
 use crate::data::StreamData;
 use crate::state::State;
-use hyper::body::Buf;
-use hyper::{body::HttpBody, header::HeaderValue, HeaderMap};
+use async_pipe::{self, PipeReader, PipeWriter};
+use bytes::Bytes;
+use http::{HeaderMap, HeaderValue};
+use http_body::{Body, SizeHint};
 use pin_project_lite::pin_project;
-use std::io::BufReader;
-use std::marker::PhantomData;
-use std::marker::Unpin;
+use std::borrow::Cow;
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::io::{self, AsyncRead};
 
-pub const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+const DEFAULT_BUF_SIZE: usize = 8 * 1024;
+
+/// An [HttpBody](https://docs.rs/hyper/0.13.4/hyper/body/trait.HttpBody.html) implementation which handles data streaming in an efficient way.
+///
+/// It is similar to [Body](https://docs.rs/hyper/0.13.4/hyper/body/struct.Body.html).
+pub struct StreamBody {
+    inner: Inner,
+}
+
+enum Inner {
+    Once(OnceInner),
+    Channel(ChannelInner),
+}
+
+struct OnceInner {
+    data: Option<Bytes>,
+    reached_eof: bool,
+    state: Arc<Mutex<State>>,
+}
 
 pin_project! {
-    pub struct StreamBody<R> {
+    struct ChannelInner {
         #[pin]
-        pub(crate) reader: R,
-        pub(crate) buf: Box<[u8]>,
-        pub(crate) len: usize,
-        pub(crate) reached_eof: bool,
-        pub(crate) state: Arc<Mutex<State>>,
+        reader: PipeReader,
+        buf: Box<[u8]>,
+        len: usize,
+        reached_eof: bool,
+        state: Arc<Mutex<State>>,
     }
 }
 
-impl<R> StreamBody<R>
-where
-    R: AsyncRead + Send + Sync,
-{
-    pub fn new(reader: R) -> StreamBody<R> {
-        StreamBody::with_capacity(DEFAULT_BUF_SIZE, reader)
+impl StreamBody {
+    /// Creates an empty body.
+    pub fn empty() -> StreamBody {
+        StreamBody {
+            inner: Inner::Once(OnceInner {
+                data: None,
+                reached_eof: true,
+                state: Arc::new(Mutex::new(State {
+                    is_current_stream_data_consumed: true,
+                    waker: None,
+                })),
+            }),
+        }
     }
 
-    pub fn with_capacity(capacity: usize, reader: R) -> StreamBody<R> {
+    /// Creates a body stream with an associated writer half.
+    ///
+    /// Useful when wanting to stream chunks from another thread.
+    pub fn channel() -> (PipeWriter, StreamBody) {
+        StreamBody::channel_with_capacity(DEFAULT_BUF_SIZE)
+    }
+
+    /// Creates a body stream with an associated writer half having a specific size of internal buffer.
+    ///
+    /// Useful when wanting to stream chunks from another thread.
+    pub fn channel_with_capacity(capacity: usize) -> (PipeWriter, StreamBody) {
+        let (w, r) = async_pipe::pipe();
+
+        let mut buffer = Vec::with_capacity(capacity);
         unsafe {
-            let mut buffer = Vec::with_capacity(capacity);
             buffer.set_len(capacity);
 
-            {
-                let b = &mut *(&mut buffer[..] as *mut [u8] as *mut [MaybeUninit<u8>]);
-                reader.prepare_uninitialized_buffer(b);
-            }
+            let b = &mut *(&mut buffer[..] as *mut [u8] as *mut [MaybeUninit<u8>]);
+            r.prepare_uninitialized_buffer(b);
+        }
 
-            StreamBody {
-                reader,
+        let body = StreamBody {
+            inner: Inner::Channel(ChannelInner {
+                reader: r,
                 buf: buffer.into_boxed_slice(),
                 len: 0,
                 reached_eof: false,
                 state: Arc::new(Mutex::new(State {
                     is_current_stream_data_consumed: true,
+                    waker: None,
                 })),
-            }
-        }
-    }
+            }),
+        };
 
-    fn check_if_prev_data_consumed(&self) -> io::Result<()> {
-        let mut state;
-        match self.state.lock() {
-            Ok(s) => state = s,
-            Err(err) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "{}: StreamBody: Failed to lock the stream state: {}",
-                        env!("CARGO_PKG_NAME"),
-                        err
-                    ),
-                ))
-            }
-        }
-
-        if !state.is_current_stream_data_consumed {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "The previous StreamData is not yet consumed",
-            ));
-        }
-
-        Ok(())
+        (w, body)
     }
 }
 
-impl<R> HttpBody for StreamBody<R>
-where
-    R: AsyncRead + Send + Sync + Unpin,
-{
+impl Body for StreamBody {
     type Data = StreamData;
     type Error = io::Error;
 
-    fn poll_data(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
-        if let Err(err) = self.check_if_prev_data_consumed() {
-            return Poll::Ready(Some(Err(err)));
-        }
-
-        let mut me = self.as_mut().project();
-        let poll_status = me.reader.poll_read(cx, &mut me.buf[..]);
-
-        match poll_status {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => match result {
-                Ok(read_count) if read_count > 0 => {
-                    let buf = &self.buf[..];
-                    let data = StreamData::new(&self.buf[..], Arc::clone(&self.state));
-                    Poll::Ready(Some(Ok(data)))
+    fn poll_data(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        match self.inner {
+            Inner::Once(ref mut inner) => {
+                let mut state;
+                match inner.state.lock() {
+                    Ok(s) => state = s,
+                    Err(err) => {
+                        return Poll::Ready(Some(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!(
+                                "{}: StreamBody [Once Data]: Failed to lock the stream state on poll data: {}",
+                                env!("CARGO_PKG_NAME"),
+                                err
+                            ),
+                        ))));
+                    }
                 }
-                Ok(_) => {
-                    self.reached_eof = true;
-                    Poll::Ready(None)
+
+                if !state.is_current_stream_data_consumed {
+                    state.waker = Some(cx.waker().clone());
+                    return Poll::Pending;
                 }
-                Err(err) => Poll::Ready(Some(Err(err))),
-            },
+
+                if inner.reached_eof {
+                    return Poll::Ready(None);
+                }
+
+                if let Some(ref bytes) = inner.data {
+                    state.is_current_stream_data_consumed = false;
+                    inner.reached_eof = true;
+
+                    let data = StreamData::new(&bytes[..], Arc::clone(&inner.state));
+
+                    return Poll::Ready(Some(Ok(data)));
+                }
+
+                return Poll::Ready(None);
+            }
+            Inner::Channel(ref mut inner) => {
+                let mut inner_me = Pin::new(inner).project();
+
+                let mut state;
+                match inner_me.state.lock() {
+                    Ok(s) => state = s,
+                    Err(err) => {
+                        return Poll::Ready(Some(Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!(
+                                "{}: StreamBody [Channel Data]: Failed to lock the stream state on poll data: {}",
+                                env!("CARGO_PKG_NAME"),
+                                err
+                            ),
+                        ))));
+                    }
+                }
+
+                if !state.is_current_stream_data_consumed {
+                    state.waker = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+
+                if *inner_me.reached_eof {
+                    return Poll::Ready(None);
+                }
+
+                let buf: &mut Box<[u8]> = &mut inner_me.buf;
+                let poll_status = inner_me.reader.poll_read(cx, &mut buf[..]);
+
+                match poll_status {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(result) => match result {
+                        Ok(read_count) if read_count > 0 => {
+                            state.is_current_stream_data_consumed = false;
+
+                            let data = StreamData::new(&buf[..read_count], Arc::clone(&inner_me.state));
+                            Poll::Ready(Some(Ok(data)))
+                        }
+                        Ok(_) => {
+                            *inner_me.reached_eof = true;
+                            Poll::Ready(None)
+                        }
+                        Err(err) => Poll::Ready(Some(Err(err))),
+                    },
+                }
+            }
         }
     }
 
     fn poll_trailers(
         self: Pin<&mut Self>,
-        cx: &mut Context,
+        _cx: &mut Context,
     ) -> Poll<Result<Option<HeaderMap<HeaderValue>>, Self::Error>> {
         Poll::Ready(Ok(None))
     }
 
     fn is_end_stream(&self) -> bool {
-        self.reached_eof
+        match self.inner {
+            Inner::Once(ref inner) => inner.reached_eof,
+            Inner::Channel(ref inner) => inner.reached_eof,
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self.inner {
+            Inner::Once(ref inner) => match inner.data {
+                Some(ref data) => SizeHint::with_exact(data.len() as u64),
+                None => SizeHint::with_exact(0),
+            },
+            Inner::Channel(_) => SizeHint::default(),
+        }
+    }
+}
+
+impl From<Bytes> for StreamBody {
+    #[inline]
+    fn from(chunk: Bytes) -> StreamBody {
+        if chunk.is_empty() {
+            StreamBody::empty()
+        } else {
+            StreamBody {
+                inner: Inner::Once(OnceInner {
+                    data: Some(chunk),
+                    reached_eof: false,
+                    state: Arc::new(Mutex::new(State {
+                        is_current_stream_data_consumed: true,
+                        waker: None,
+                    })),
+                }),
+            }
+        }
+    }
+}
+
+impl From<Vec<u8>> for StreamBody {
+    #[inline]
+    fn from(vec: Vec<u8>) -> StreamBody {
+        StreamBody::from(Bytes::from(vec))
+    }
+}
+
+impl From<&'static [u8]> for StreamBody {
+    #[inline]
+    fn from(slice: &'static [u8]) -> StreamBody {
+        StreamBody::from(Bytes::from(slice))
+    }
+}
+
+impl From<Cow<'static, [u8]>> for StreamBody {
+    #[inline]
+    fn from(cow: Cow<'static, [u8]>) -> StreamBody {
+        match cow {
+            Cow::Borrowed(b) => StreamBody::from(b),
+            Cow::Owned(o) => StreamBody::from(o),
+        }
+    }
+}
+
+impl From<String> for StreamBody {
+    #[inline]
+    fn from(s: String) -> StreamBody {
+        StreamBody::from(Bytes::from(s.into_bytes()))
+    }
+}
+
+impl From<&'static str> for StreamBody {
+    #[inline]
+    fn from(slice: &'static str) -> StreamBody {
+        StreamBody::from(Bytes::from(slice.as_bytes()))
+    }
+}
+
+impl From<Cow<'static, str>> for StreamBody {
+    #[inline]
+    fn from(cow: Cow<'static, str>) -> StreamBody {
+        match cow {
+            Cow::Borrowed(b) => StreamBody::from(b),
+            Cow::Owned(o) => StreamBody::from(o),
+        }
     }
 }

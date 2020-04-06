@@ -1,7 +1,8 @@
 use crate::state::State;
-use hyper::body::Buf;
+use bytes::Buf;
 use std::sync::{Arc, Mutex};
 
+/// The data chunk type produced by `StreamBody`.
 pub struct StreamData {
     ptr: *const u8,
     len: usize,
@@ -22,21 +23,6 @@ impl StreamData {
 
 unsafe impl std::marker::Send for StreamData {}
 
-impl Drop for StreamData {
-    fn drop(&mut self) {
-        match self.state.lock() {
-            Ok(mut state) => {
-                state.is_current_stream_data_consumed = true;
-            }
-            Err(err) => log::error!(
-                "{}: StreamData: Failed to update the drop state: {}",
-                env!("CARGO_PKG_NAME"),
-                err
-            ),
-        }
-    }
-}
-
 impl Buf for StreamData {
     fn remaining(&self) -> usize {
         self.len - self.pos
@@ -48,5 +34,24 @@ impl Buf for StreamData {
 
     fn advance(&mut self, cnt: usize) {
         self.pos += cnt;
+    }
+}
+
+impl Drop for StreamData {
+    fn drop(&mut self) {
+        match self.state.lock() {
+            Ok(mut state) => {
+                state.is_current_stream_data_consumed = true;
+                if let Some(ref waker) = state.waker {
+                    waker.clone().wake();
+                }
+                state.waker = None;
+            }
+            Err(err) => log::error!(
+                "{}: StreamData: Failed to update the drop state: {}",
+                env!("CARGO_PKG_NAME"),
+                err
+            ),
+        }
     }
 }
