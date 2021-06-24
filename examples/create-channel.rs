@@ -1,5 +1,5 @@
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server};
+use hyper::{server::Server, Body, Request, Response};
 use std::{convert::Infallible, net::SocketAddr};
 use stream_body::StreamBody;
 use tokio::fs::File;
@@ -15,6 +15,7 @@ async fn handle(_: Request<Body>) -> Result<Response<StreamBody>, Infallible> {
         loop {
             let read_count = f.read(&mut buf).await.unwrap();
             if read_count == 0 {
+                println!("nice");
                 break;
             }
             writer.write_all(&buf[..read_count]).await.unwrap();

@@ -28,7 +28,7 @@ impl Buf for StreamData {
         self.len - self.pos
     }
 
-    fn bytes(&self) -> &[u8] {
+    fn chunk(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.add(self.pos), self.len - self.pos) }
     }
 
