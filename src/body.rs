@@ -14,9 +14,9 @@ use tokio::io::{self, AsyncRead, ReadBuf};
 
 const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
-/// An [HttpBody](https://docs.rs/hyper/0.14.9/hyper/body/trait.HttpBody.html) implementation which handles data streaming in an efficient way.
+/// An [HttpBody](https://docs.rs/hyper/0.14.11/hyper/body/trait.HttpBody.html) implementation which handles data streaming in an efficient way.
 ///
-/// It is similar to [Body](https://docs.rs/hyper/0.14.9/hyper/body/struct.Body.html).
+/// It is similar to [Body](https://docs.rs/hyper/0.14.11/hyper/body/struct.Body.html).
 pub struct StreamBody {
     inner: Inner,
 }
@@ -187,18 +187,18 @@ impl Body for StreamBody {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(result) => match result {
                         Ok(_) => {
-                            if buf.remaining() == 0 {
-                                *inner_me.reached_eof = true;
-                                Poll::Ready(None)
-                            } else {
+                            if (buf.capacity() - buf.remaining()) > 0 {
                                 state.is_current_stream_data_consumed = false;
 
-                                let data = StreamData::new(buf.initialized(), Arc::clone(&inner_me.state));
+                                let data = StreamData::new(buf.filled(), Arc::clone(&inner_me.state));
                                 Poll::Ready(Some(Ok(data)))
+                            }else{
+                                *inner_me.reached_eof = true;
+                                Poll::Ready(None)
                             }
                         }
                         Err(err) => Poll::Ready(Some(Err(err))),
-                    },
+                    }
                 }
             }
         }
