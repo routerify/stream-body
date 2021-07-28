@@ -1,5 +1,5 @@
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server};
+use hyper::{server::Server, Body, Request, Response};
 use std::{convert::Infallible, net::SocketAddr};
 use stream_body::StreamBody;
 use tokio::fs::File;

@@ -7,17 +7,16 @@ use http_body::{Body, SizeHint};
 use pin_project_lite::pin_project;
 use std::borrow::Cow;
 use std::marker::Unpin;
-use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use tokio::io::{self, AsyncRead};
+use tokio::io::{self, AsyncRead, ReadBuf};
 
 const DEFAULT_BUF_SIZE: usize = 8 * 1024;
 
-/// An [HttpBody](https://docs.rs/hyper/0.13.4/hyper/body/trait.HttpBody.html) implementation which handles data streaming in an efficient way.
+/// An [HttpBody](https://docs.rs/hyper/0.14.11/hyper/body/trait.HttpBody.html) implementation which handles data streaming in an efficient way.
 ///
-/// It is similar to [Body](https://docs.rs/hyper/0.13.4/hyper/body/struct.Body.html).
+/// It is similar to [Body](https://docs.rs/hyper/0.14.11/hyper/body/struct.Body.html).
 pub struct StreamBody {
     inner: Inner,
 }
@@ -75,9 +74,6 @@ impl StreamBody {
         let mut buffer = Vec::with_capacity(capacity);
         unsafe {
             buffer.set_len(capacity);
-
-            let b = &mut *(&mut buffer[..] as *mut [u8] as *mut [MaybeUninit<u8>]);
-            r.prepare_uninitialized_buffer(b);
         }
 
         let body = StreamBody {
@@ -184,24 +180,25 @@ impl Body for StreamBody {
                     return Poll::Ready(None);
                 }
 
-                let buf: &mut Box<[u8]> = &mut inner_me.buf;
-                let poll_status = inner_me.reader.poll_read(cx, &mut buf[..]);
+                let mut buf = ReadBuf::new(&mut inner_me.buf);
+                let poll_status = inner_me.reader.poll_read(cx, &mut buf);
 
                 match poll_status {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(result) => match result {
-                        Ok(read_count) if read_count > 0 => {
-                            state.is_current_stream_data_consumed = false;
-
-                            let data = StreamData::new(&buf[..read_count], Arc::clone(&inner_me.state));
-                            Poll::Ready(Some(Ok(data)))
-                        }
                         Ok(_) => {
-                            *inner_me.reached_eof = true;
-                            Poll::Ready(None)
+                            if (buf.capacity() - buf.remaining()) > 0 {
+                                state.is_current_stream_data_consumed = false;
+
+                                let data = StreamData::new(buf.filled(), Arc::clone(&inner_me.state));
+                                Poll::Ready(Some(Ok(data)))
+                            }else{
+                                *inner_me.reached_eof = true;
+                                Poll::Ready(None)
+                            }
                         }
                         Err(err) => Poll::Ready(Some(Err(err))),
-                    },
+                    }
                 }
             }
         }
